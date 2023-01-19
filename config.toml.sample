@@ -1,0 +1,9 @@
+[OauthConfig]
+
+ClientID = ""
+ClientSecret = ""
+TenantID = ""
+ServerProtocol = "http"
+ServerHost = "localhost"
+ServerPort = 8000
+
