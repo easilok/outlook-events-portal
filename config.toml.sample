@@ -7,3 +7,12 @@ ServerProtocol = "http"
 ServerHost = "localhost"
 ServerPort = 8000
 
+
+[CredentialsConfig]
+# Defines if the browser should auto start when login is needed
+Browser = true
+# Defines if the credentials should be saved to the filesystem to cache next run
+Persist = false
+# Full filesystem path to save a credentials.toml file with the last valid credentials for the user logged in
+# this path should already exist and be accessible
+StoragePath = "~/.cache/outlookEvents"

@@ -5,14 +5,15 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net"
-	"os/exec"
+	"path/filepath"
+	"sync"
 	"time"
 
 	"log"
 	"net/http"
-	"net/url"
 
 	"github.com/BurntSushi/toml"
+	"github.com/easilok/outlook_event_reading/authentication"
 )
 
 type GraphAuthentication struct {
@@ -44,21 +45,14 @@ type OutlookEvent struct {
 }
 
 type OutlookEventList struct {
+	Lock    sync.Mutex
 	Context string         `json:"@odata.context"`
 	Value   []OutlookEvent `json:"value"`
 }
 
-type OauthConfig struct {
-	ClientID       string
-	ClientSecret   string
-	TenantID       string
-	ServerProtocol string
-	ServerHost     string
-	ServerPort     int
-}
-
 type ApplicationConfig struct {
-	OauthConfig OauthConfig
+	OauthConfig       authentication.OauthConfig
+	CredentialsConfig authentication.CredentialsConfig
 }
 
 const (
@@ -77,6 +71,7 @@ var redirectURI = fmt.Sprintf("%s://%s:%d/callback", serverProtocol, serverHost,
 
 var graphEvents OutlookEventList
 var applicationConfig ApplicationConfig
+var graphCredentials authentication.CredentialStorage
 
 func loadConfig() {
 	configContent, err := ioutil.ReadFile("config.toml") // the file is inside the local directory
@@ -104,44 +99,42 @@ func loadConfig() {
 	}
 }
 
+func loadCredentials() {
+	// Initialize variable
+	graphCredentials = authentication.CredentialStorage{}
+	// Only load if persistent storage is enabled
+	if !applicationConfig.CredentialsConfig.Persist {
+		return
+	}
+	credentialsContent, err := ioutil.ReadFile(filepath.Join(applicationConfig.CredentialsConfig.StoragePath, "credentials.toml"))
+	if err != nil {
+		fmt.Println("Error loading existing credentials file: ", err.Error())
+	}
+
+	_, err = toml.Decode(string(credentialsContent), &graphCredentials.Credentials)
+	if err != nil {
+		fmt.Println("Error decoding existing credentials file: ", err.Error())
+	}
+}
+
 func main() {
 	loadConfig()
 	fmt.Println(applicationConfig)
+	loadCredentials()
 	// Start a server on port 8000
-	http.HandleFunc("/", home)
-	http.HandleFunc("/login", login)
-	http.HandleFunc("/success", success)
-	http.HandleFunc("/callback", callback)
-	http.HandleFunc("/next-event", nextEventHandler)
 	servingHost := fmt.Sprintf("%s:%d", serverHost, serverPort)
-	fmt.Printf("Serving login server on %s://%s\n", serverProtocol, servingHost)
+	fmt.Printf("Serving login server on %s\n", applicationConfig.OauthConfig.BaseURL())
 	l, err := net.Listen("tcp", servingHost)
 	if err != nil {
 		log.Fatal(err)
 	}
-	// The browser can connect now because the listening socket is open.
-	browserOpenErr := exec.Command("open", fmt.Sprintf("%s://%s", serverProtocol, servingHost)).Start()
-	if browserOpenErr != nil {
-		fmt.Printf("Error opening browser to login: %s\n", browserOpenErr.Error())
-	}
 
+	http.HandleFunc("/next-event", nextEventHandler)
+
+	graphCredentials.Run(&applicationConfig.OauthConfig, &applicationConfig.CredentialsConfig)
 	// log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", serverPort), nil))
+	go outlookEventRefreshManager()
 	log.Fatal(http.Serve(l, nil))
-}
-
-func home(w http.ResponseWriter, r *http.Request) {
-	// Display a link to the login page
-	fmt.Fprint(w, "<a href='/login'>Login</a>")
-}
-
-func success(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprint(w, "<p>Login success. You can not close this tab.</p>")
-}
-
-func login(w http.ResponseWriter, r *http.Request) {
-	// Redirect the user to the Microsoft login page
-	url := fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/authorize?client_id=%s&response_type=code&redirect_uri=%s&scope=Calendars.Read", tenantID, clientID, redirectURI)
-	http.Redirect(w, r, url, http.StatusFound)
 }
 
 func nextEventHandler(w http.ResponseWriter, r *http.Request) {
@@ -154,45 +147,33 @@ func nextEventHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func callback(w http.ResponseWriter, r *http.Request) {
-	// Get the authorization code from the query parameter
-	code := r.URL.Query().Get("code")
+func outlookEventRefreshManager() {
+	// This manager is a infinite loop only stopping if token refresh results in error
+	for {
+		fetchEventsTicker := 10 * time.Second
 
-	fmt.Println("fetched code: ", code)
+		<-time.After(fetchEventsTicker)
 
-	// Use the authorization code to acquire an access token
-	data := url.Values{
-		"client_id":     {clientID},
-		"scope":         {"https://graph.microsoft.com/.default offline_access"},
-		"code":          {code},
-		"redirect_uri":  {redirectURI},
-		"grant_type":    {"authorization_code"},
-		"client_secret": {clientSecret},
+		fetchEventsFromOutlook()
 	}
+}
 
-	resp, err := http.PostForm(fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/token", tenantID), data)
-	if err != nil {
-		fmt.Println("Error acquiring token:", err)
+func fetchEventsFromOutlook() {
+	// Use object lock for multithread access
+	graphCredentials.Lock.Lock()
+	isAuthenticated := graphCredentials.Authenticated
+	// Save access token to release lock from now on
+	graphAccessToken := graphCredentials.Credentials.AccessToken
+	graphCredentials.Lock.Unlock()
+
+	if !isAuthenticated {
+		fmt.Println("Application is not yet authenticated")
 		return
 	}
 
-	// var graphAuth map[string]interface{}
-	var graphAuth GraphAuthentication
-
-	fmt.Println("Req code: ", resp.StatusCode)
-	fmt.Println("Resp body: ", resp.Body)
-	json.NewDecoder(resp.Body).Decode(&graphAuth)
-
-	fmt.Println("Token type: ", graphAuth.Token)
-	fmt.Println("Access Token: ", graphAuth.AccessToken)
-	fmt.Println("Token expires in (s): ", graphAuth.ExpiresIn)
-	fmt.Println("Token sope: ", graphAuth.Scope)
-	fmt.Println("Refresh Token: ", graphAuth.RefreshToken)
-
-	// println("Fetched token: ", token)
 	// Get the current date and the date for tomorrow
 	now := time.Now()
-	tomorrow := now.Add(time.Hour * 24)
+	tomorrow := now.Add(time.Hour * 72)
 
 	// Format the dates for the API request
 	startDate := now.Format("2006-01-02T15:04:05")
@@ -206,7 +187,7 @@ func callback(w http.ResponseWriter, r *http.Request) {
 		fmt.Println("Error acquiring token:", err)
 		return
 	}
-	eventsReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", graphAuth.AccessToken))
+	eventsReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", graphAccessToken))
 	client := &http.Client{}
 	eventsResponse, err := client.Do(eventsReq)
 	if err != nil {
@@ -219,12 +200,12 @@ func callback(w http.ResponseWriter, r *http.Request) {
 	// fmt.Println("Events response: ", graphEvents)
 
 	// Print the details of each meeting
+	fmt.Printf("Fetched %d events from outlook\n", len(graphEvents.Value))
+
 	for i, event := range graphEvents.Value {
 		fmt.Printf("Event %d:\n", i+1)
 		fmt.Printf("Subject: %s\n", event.Subject)
 		fmt.Printf("Start time: %s\n", event.Start.DateTime)
 		fmt.Printf("End time: %s\n\n", event.End.DateTime)
 	}
-
-	http.Redirect(w, r, "/success", http.StatusSeeOther)
 }
