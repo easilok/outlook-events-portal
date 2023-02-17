@@ -3,17 +3,19 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net"
+	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"sync"
 	"time"
 
-	"log"
 	"net/http"
 
 	"github.com/BurntSushi/toml"
 	"github.com/easilok/outlook_event_reading/authentication"
+	"github.com/sirupsen/logrus"
 )
 
 type GraphAuthentication struct {
@@ -45,9 +47,10 @@ type OutlookEvent struct {
 }
 
 type OutlookEventList struct {
-	Lock    sync.Mutex
-	Context string         `json:"@odata.context"`
-	Value   []OutlookEvent `json:"value"`
+	Lock       sync.Mutex
+	LastUpdate time.Time
+	Context    string         `json:"@odata.context"`
+	Value      []OutlookEvent `json:"value"`
 }
 
 type ApplicationConfig struct {
@@ -71,10 +74,12 @@ var redirectURI = fmt.Sprintf("%s://%s:%d/callback", serverProtocol, serverHost,
 
 var graphEvents OutlookEventList
 var applicationConfig ApplicationConfig
-var graphCredentials authentication.CredentialStorage
+var graphCredentials *authentication.CredentialStorage
+
+var log *logrus.Logger
 
 func loadConfig() {
-	configContent, err := ioutil.ReadFile("config.toml") // the file is inside the local directory
+	configContent, err := os.ReadFile("config.toml") // the file is inside the local directory
 	if err != nil {
 		log.Fatal(err.Error())
 	}
@@ -99,31 +104,21 @@ func loadConfig() {
 	}
 }
 
-func loadCredentials() {
-	// Initialize variable
-	graphCredentials = authentication.CredentialStorage{}
-	// Only load if persistent storage is enabled
-	if !applicationConfig.CredentialsConfig.Persist {
-		return
-	}
-	credentialsContent, err := ioutil.ReadFile(filepath.Join(applicationConfig.CredentialsConfig.StoragePath, "credentials.toml"))
-	if err != nil {
-		fmt.Println("Error loading existing credentials file: ", err.Error())
-	}
-
-	_, err = toml.Decode(string(credentialsContent), &graphCredentials.Credentials)
-	if err != nil {
-		fmt.Println("Error decoding existing credentials file: ", err.Error())
-	}
-}
-
 func main() {
 	loadConfig()
-	fmt.Println(applicationConfig)
-	loadCredentials()
+	fmt.Printf("%+v\n", applicationConfig)
+	log = logrus.New()
+	log.SetLevel(logrus.DebugLevel)
+	log.SetFormatter(&logrus.TextFormatter{
+		// DisableColors: true,
+		FullTimestamp: true,
+	})
+	// If you wish to add the calling method as a field, instruct the logger via:
+	// log.SetReportCaller(true)
+
 	// Start a server on port 8000
 	servingHost := fmt.Sprintf("%s:%d", serverHost, serverPort)
-	fmt.Printf("Serving login server on %s\n", applicationConfig.OauthConfig.BaseURL())
+	log.Info(fmt.Sprintf("Serving login server on %s\n", applicationConfig.OauthConfig.BaseURL()))
 	l, err := net.Listen("tcp", servingHost)
 	if err != nil {
 		log.Fatal(err)
@@ -131,17 +126,20 @@ func main() {
 
 	http.HandleFunc("/next-event", nextEventHandler)
 
-	graphCredentials.Run(&applicationConfig.OauthConfig, &applicationConfig.CredentialsConfig)
-	// log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", serverPort), nil))
+	graphCredentials = authentication.Run(&applicationConfig.OauthConfig, &applicationConfig.CredentialsConfig, log)
 	go outlookEventRefreshManager()
 	log.Fatal(http.Serve(l, nil))
 }
 
 func nextEventHandler(w http.ResponseWriter, r *http.Request) {
 	if len(graphEvents.Value) > 0 {
-		nextEvent := graphEvents.Value[0]
-		nextEventDateTime, _ := time.Parse("2006-01-02T15:04:05", nextEvent.Start.DateTime)
-		fmt.Fprintf(w, "%s - %d:%d", nextEvent.Subject, nextEventDateTime.Hour(), nextEventDateTime.Minute())
+		for _, nextEvent := range graphEvents.Value {
+			nextEventDateTime, _ := time.Parse("2006-01-02T15:04:05", nextEvent.Start.DateTime)
+			if nextEventDateTime.After(time.Now()) {
+				fmt.Fprintf(w, "%s - %d:%d (%d/%d)", nextEvent.Subject, nextEventDateTime.Hour(), nextEventDateTime.Minute(), nextEventDateTime.Day(), nextEventDateTime.Month())
+				return
+			}
+		}
 	} else {
 		fmt.Fprint(w, "No events")
 	}
@@ -150,24 +148,22 @@ func nextEventHandler(w http.ResponseWriter, r *http.Request) {
 func outlookEventRefreshManager() {
 	// This manager is a infinite loop only stopping if token refresh results in error
 	for {
-		fetchEventsTicker := 10 * time.Second
+		fetchEventsTicker := 60 * time.Second
 
-		<-time.After(fetchEventsTicker)
+		time.Sleep(fetchEventsTicker)
+
+		log.Debug(fmt.Sprintf("***Events Manager: currently running goroutines: %d***", runtime.NumGoroutine()))
 
 		fetchEventsFromOutlook()
 	}
 }
 
 func fetchEventsFromOutlook() {
-	// Use object lock for multithread access
-	graphCredentials.Lock.Lock()
-	isAuthenticated := graphCredentials.Authenticated
-	// Save access token to release lock from now on
-	graphAccessToken := graphCredentials.Credentials.AccessToken
-	graphCredentials.Lock.Unlock()
+	// Get accessToken and authentication status
+	graphAccessToken, isAuthenticated := graphCredentials.GetAccessToken()
 
 	if !isAuthenticated {
-		fmt.Println("Application is not yet authenticated")
+		log.Warn("Application is not yet authenticated")
 		return
 	}
 
@@ -184,28 +180,78 @@ func fetchEventsFromOutlook() {
 
 	eventsReq, err := http.NewRequest("GET", calendarViewEndpoint, nil)
 	if err != nil {
-		fmt.Println("Error acquiring token:", err)
+		log.Error(fmt.Sprintf("Error creating event list request: %s", err.Error()))
 		return
 	}
 	eventsReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", graphAccessToken))
 	client := &http.Client{}
 	eventsResponse, err := client.Do(eventsReq)
 	if err != nil {
-		fmt.Println("Error acquiring token:", err)
+		log.Error(fmt.Sprintf("Error acquiring event list: %s", err.Error()))
 		return
 	}
 
 	// var graphEvents map[string]interface{}
-	json.NewDecoder(eventsResponse.Body).Decode(&graphEvents)
-	// fmt.Println("Events response: ", graphEvents)
+	err = json.NewDecoder(eventsResponse.Body).Decode(&graphEvents)
+	eventsResponse.Body.Close()
+	if err != nil {
+		log.Error(fmt.Sprintf("Error decoding outlook events: %s", err))
+		return
+	}
+
+	graphEvents.LastUpdate = time.Now()
 
 	// Print the details of each meeting
-	fmt.Printf("Fetched %d events from outlook\n", len(graphEvents.Value))
+	log.Info(fmt.Sprintf("Fetched %d events from outlook", len(graphEvents.Value)))
+
+	sort.Slice(graphEvents.Value, func(i, j int) bool {
+		return graphEvents.Value[i].Start.DateTime < graphEvents.Value[j].Start.DateTime
+	})
 
 	for i, event := range graphEvents.Value {
-		fmt.Printf("Event %d:\n", i+1)
-		fmt.Printf("Subject: %s\n", event.Subject)
-		fmt.Printf("Start time: %s\n", event.Start.DateTime)
-		fmt.Printf("End time: %s\n\n", event.End.DateTime)
+		log.Info(fmt.Sprintf("Event %d; Subject: %s; Start time: %s; End time: %s;", i+1, event.Subject, event.Start.DateTime, event.End.DateTime))
+	}
+
+	graphEvents.persistEvent("/tmp")
+
+}
+
+func (outlookEventList *OutlookEventList) persistEvent(path string) {
+	if len(path) == 0 {
+		return
+	}
+
+	outlookEventList.Lock.Lock()
+	defer outlookEventList.Lock.Unlock()
+
+	nextEventString := "No events"
+
+	if len(outlookEventList.Value) > 0 {
+		for _, nextEvent := range outlookEventList.Value {
+			nextEventDateTime, _ := time.Parse("2006-01-02T15:04:05", nextEvent.Start.DateTime)
+			if nextEventDateTime.After(time.Now()) {
+				// nextEventString = fmt.Sprintf("%s - %d:%d (%d/%d)", nextEvent.Subject, nextEventDateTime.Hour(), nextEventDateTime.Minute(), nextEventDateTime.Day(), nextEventDateTime.Month())
+				nextEventString = fmt.Sprintf("%s - %s", nextEvent.Subject, nextEventDateTime.Format("15:04 (02/Jan)"))
+				break
+			}
+		}
+	}
+
+	// create the file
+	f, err := os.Create(filepath.Join(path, "next_event"))
+	if err != nil {
+		log.Error(fmt.Sprintf("Error creating next event file: %s", err.Error()))
+		return
+	}
+
+	// write a string
+	_, err = f.WriteString(nextEventString)
+	if err != nil {
+		log.Error(fmt.Sprintf("Error writing next event file: %s", err.Error()))
+	}
+	// close the file with defer
+	err = f.Close()
+	if err != nil {
+		log.Error(fmt.Sprintf("Error closing next event file: %s", err.Error()))
 	}
 }
