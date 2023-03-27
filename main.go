@@ -135,8 +135,9 @@ func nextEventHandler(w http.ResponseWriter, r *http.Request) {
 	if len(graphEvents.Value) > 0 {
 		for _, nextEvent := range graphEvents.Value {
 			nextEventDateTime, _ := time.Parse("2006-01-02T15:04:05", nextEvent.Start.DateTime)
+			nextEventDateTime = nextEventDateTime.In(time.Local)
 			if nextEventDateTime.After(time.Now()) {
-				fmt.Fprintf(w, "%s - %d:%d (%d/%d)", nextEvent.Subject, nextEventDateTime.Hour(), nextEventDateTime.Minute(), nextEventDateTime.Day(), nextEventDateTime.Month())
+				fmt.Fprintf(w, "%s - %d:%d (%d/%d) %s", nextEvent.Subject, nextEventDateTime.Hour(), nextEventDateTime.Minute(), nextEventDateTime.Day(), nextEventDateTime.Month(), nextEventDateTime.Location())
 				return
 			}
 		}
@@ -168,8 +169,8 @@ func fetchEventsFromOutlook() {
 	}
 
 	// Get the current date and the date for tomorrow
-	now := time.Now()
-	tomorrow := now.Add(time.Hour * 72)
+	now := time.Now().UTC()
+	tomorrow := now.Add(time.Hour * 72).UTC()
 
 	// Format the dates for the API request
 	startDate := now.Format("2006-01-02T15:04:05")
@@ -229,9 +230,12 @@ func (outlookEventList *OutlookEventList) persistEvent(path string) {
 	if len(outlookEventList.Value) > 0 {
 		for _, nextEvent := range outlookEventList.Value {
 			nextEventDateTime, _ := time.Parse("2006-01-02T15:04:05", nextEvent.Start.DateTime)
+			nextEventEndDateTime, _ := time.Parse("2006-01-02T15:04:05", nextEvent.End.DateTime)
+			nextEventDateTime = nextEventDateTime.In(time.Local)
+			nextEventEndDateTime = nextEventEndDateTime.In(time.Local)
 			if nextEventDateTime.After(time.Now()) {
 				// nextEventString = fmt.Sprintf("%s - %d:%d (%d/%d)", nextEvent.Subject, nextEventDateTime.Hour(), nextEventDateTime.Minute(), nextEventDateTime.Day(), nextEventDateTime.Month())
-				nextEventString = fmt.Sprintf("%s - %s", nextEvent.Subject, nextEventDateTime.Format("15:04 (02/Jan)"))
+				nextEventString = fmt.Sprintf("%s - %s - %s", nextEvent.Subject, nextEventDateTime.Format("15:04 (02/Jan)"), nextEventEndDateTime.Format("15:04 (02/Jan)"))
 				break
 			}
 		}
