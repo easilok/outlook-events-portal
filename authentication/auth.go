@@ -108,16 +108,22 @@ func Run(oauth *OauthConfig, appConfig *CredentialsConfig, log Logger) *Credenti
 		if err := refreshTokenHandler(); err == nil {
 			// If token refresh succeeds, start the refresh manager
 			go graphCredentialStorage.refreshTokenManager()
-			return nil
 		}
+	} else {
+		// The browser can connect now because the listening socket is open.
+		openLoginPage()
 	}
-	// The browser can connect now because the listening socket is open.
-	openLoginPage()
 
 	return &graphCredentialStorage
 }
 
 func (credentials *CredentialStorage) GetAccessToken() (string, bool) {
+
+	if credentials == nil {
+		logger.Warn("Trying to get token from empty credentials")
+		return "", false
+	}
+
 	credentials.lock.Lock()
 	Authenticated := credentials.authenticated
 	accessToken := credentials.credentials.AccessToken
