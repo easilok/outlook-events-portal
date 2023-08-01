@@ -4,7 +4,7 @@ ClientID = ""
 ClientSecret = ""
 TenantID = ""
 ServerProtocol = "http"
-ServerHost = "localhost"
+ServerHost = "0.0.0.0"
 ServerPort = 8000
 
 
@@ -15,4 +15,4 @@ Browser = true
 Persist = false
 # Full filesystem path to save a credentials.toml file with the last valid credentials for the user logged in
 # this path should already exist and be accessible
-StoragePath = "~/.cache/outlookEvents"
+StoragePath = "/cache"
