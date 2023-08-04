@@ -214,7 +214,7 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func successHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprint(w, "<p>Login success. You can not close this tab.</p>")
+	fmt.Fprint(w, "<p>Login success. You can now close this tab.</p>")
 }
 
 func errorHandler(w http.ResponseWriter, r *http.Request) {

@@ -56,6 +56,9 @@ type OutlookEventList struct {
 type ApplicationConfig struct {
 	OauthConfig       authentication.OauthConfig
 	CredentialsConfig authentication.CredentialsConfig
+	ServerProtocol    string
+	ServerHost        string
+	ServerPort        int
 }
 
 const (
@@ -96,12 +99,16 @@ func loadConfig() {
 	if len(applicationConfig.OauthConfig.ServerProtocol) > 0 {
 		serverProtocol = applicationConfig.OauthConfig.ServerProtocol
 	}
-	if len(applicationConfig.OauthConfig.ServerHost) > 0 {
-		serverHost = applicationConfig.OauthConfig.ServerHost
+	if len(applicationConfig.ServerHost) > 0 {
+		serverHost = applicationConfig.ServerHost
 	}
-	if applicationConfig.OauthConfig.ServerPort > 0 {
-		serverPort = applicationConfig.OauthConfig.ServerPort
+	if applicationConfig.ServerPort > 0 {
+		serverPort = applicationConfig.ServerPort
 	}
+}
+
+func (config *ApplicationConfig) BaseURL() string {
+	return fmt.Sprintf("%s://%s:%d", config.ServerProtocol, config.ServerHost, config.ServerPort)
 }
 
 func main() {
@@ -118,7 +125,7 @@ func main() {
 
 	// Start a server on port 8000
 	servingHost := fmt.Sprintf("%s:%d", serverHost, serverPort)
-	log.Info(fmt.Sprintf("Serving login server on %s\n", applicationConfig.OauthConfig.BaseURL()))
+	log.Info(fmt.Sprintf("Serving login server on %s", applicationConfig.BaseURL()))
 	l, err := net.Listen("tcp", servingHost)
 	if err != nil {
 		log.Fatal(err)
@@ -149,7 +156,7 @@ func nextEventHandler(w http.ResponseWriter, r *http.Request) {
 func outlookEventRefreshManager() {
 	// This manager is a infinite loop only stopping if token refresh results in error
 	for {
-		fetchEventsTicker := 60 * time.Second
+		fetchEventsTicker := 10 * time.Second
 
 		time.Sleep(fetchEventsTicker)
 

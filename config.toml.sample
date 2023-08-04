@@ -1,10 +1,14 @@
+ServerProtocol = "http"
+ServerHost = "0.0.0.0"
+ServerPort = 8000
+
 [OauthConfig]
 
 ClientID = ""
 ClientSecret = ""
 TenantID = ""
 ServerProtocol = "http"
-ServerHost = "0.0.0.0"
+ServerHost = "localhost"
 ServerPort = 8000
 
 
